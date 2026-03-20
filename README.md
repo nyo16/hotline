@@ -126,6 +126,33 @@ Only accept updates from specific Telegram user IDs:
 
 Updates from non-allowed users are silently dropped.
 
+### Chat Registry
+
+Hotline can automatically track all chats your bot interacts with, persisted across restarts via DETS:
+
+```elixir
+children = [
+  {Hotline.Poller, []},
+  {Hotline.ChatRegistry, dets_path: "priv/chats.dets"},
+  {MyBot, []}
+]
+```
+
+Or configure globally:
+
+```elixir
+config :hotline,
+  chat_registry_path: "priv/chats.dets"
+```
+
+Then query known chats anytime:
+
+```elixir
+Hotline.ChatRegistry.list()          # all known chats
+Hotline.ChatRegistry.get(7644580464) # lookup by chat_id
+Hotline.ChatRegistry.count()         # total count
+```
+
 ## Webhooks
 
 Use `Hotline.Webhook` as a Plug, or deploy standalone with Bandit:
