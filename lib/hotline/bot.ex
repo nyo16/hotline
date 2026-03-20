@@ -25,6 +25,16 @@ defmodule Hotline.Bot do
       children = [
         {MyBot, token: "your-bot-token"}
       ]
+
+  ## Restricting by user ID
+
+  Pass `allowed_ids` to only accept updates from specific users:
+
+      children = [
+        {MyBot, token: "your-bot-token", allowed_ids: [7644580464]}
+      ]
+
+  Updates from other users are silently dropped. Omit `allowed_ids` to accept all.
   """
 
   @callback handle_update(Hotline.Types.Update.t(), map()) :: {:noreply, map()}
@@ -49,6 +59,7 @@ defmodule Hotline.Bot do
 
         state = %{
           chat_id: init_opts[:chat_id],
+          allowed_ids: init_opts[:allowed_ids],
           opts: init_opts
         }
 
@@ -67,16 +78,22 @@ defmodule Hotline.Bot do
 
       @impl GenServer
       def handle_info({:hotline_update, update}, state) do
-        state =
-          case update do
-            %{message: %{chat: %{id: chat_id}}} when is_nil(state.chat_id) ->
-              %{state | chat_id: chat_id}
+        sender_id = Hotline.Bot.extract_sender_id(update)
 
-            _ ->
-              state
-          end
+        if Hotline.Bot.allowed?(sender_id, state.allowed_ids) do
+          state =
+            case update do
+              %{message: %{chat: %{id: chat_id}}} when is_nil(state.chat_id) ->
+                %{state | chat_id: chat_id}
 
-        handle_update(update, state)
+              _ ->
+                state
+            end
+
+          handle_update(update, state)
+        else
+          {:noreply, state}
+        end
       end
 
       def handle_info(_msg, state), do: {:noreply, state}
@@ -84,4 +101,16 @@ defmodule Hotline.Bot do
       defoverridable start_link: 1, init: 1
     end
   end
+
+  @doc false
+  def allowed?(_sender_id, nil), do: true
+  def allowed?(nil, _allowed_ids), do: false
+  def allowed?(sender_id, allowed_ids), do: sender_id in allowed_ids
+
+  @doc false
+  def extract_sender_id(%{message: %{from: %{id: id}}}), do: id
+  def extract_sender_id(%{callback_query: %{from: %{id: id}}}), do: id
+  def extract_sender_id(%{edited_message: %{from: %{id: id}}}), do: id
+  def extract_sender_id(%{channel_post: %{chat: %{id: id}}}), do: id
+  def extract_sender_id(_), do: nil
 end
