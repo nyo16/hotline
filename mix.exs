@@ -2,7 +2,7 @@ defmodule Hotline.MixProject do
   use Mix.Project
 
   @version "0.1.0"
-  @source_url "https://github.com/nmaroulis/hotline"
+  @source_url "https://github.com/nyo16/hotline"
 
   def project do
     [
@@ -48,7 +48,7 @@ defmodule Hotline.MixProject do
   defp docs do
     [
       main: "Hotline",
-      extras: ["README.md"]
+      extras: ["README.md", "CHANGELOG.md"]
     ]
   end
 
