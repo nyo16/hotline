@@ -174,6 +174,7 @@ See the [`examples/`](examples/) directory:
 | [`echo_bot.exs`](examples/echo_bot.exs) | Echoes back whatever the user sends |
 | [`greeter_bot.exs`](examples/greeter_bot.exs) | Handles `/start`, `/help`, `/ping`, `/whoami` commands |
 | [`stream_logger.exs`](examples/stream_logger.exs) | Logs incoming updates to the console via streaming |
+| [`broadway_pipeline.exs`](examples/broadway_pipeline.exs) | Process updates through a Broadway pipeline |
 
 Run any example:
 
