@@ -1,19 +1,25 @@
 # Hotline
 
-Telegram Bot API client and framework for Elixir.
+> Telegram Bot API client and framework for Elixir.
+
+Hotline gives you everything you need to build Telegram bots in Elixir — from quick IEx exploration to production-ready supervised bots with long-polling, webhooks, and Broadway pipelines.
+
+---
 
 ## Features
 
-- **Type-safe** — Parsed Telegram types with nested struct resolution
-- **Long-polling** — Built-in `Hotline.Poller` GenServer with offset tracking, 409/429 handling
-- **Webhooks** — `Hotline.Webhook` Plug with secret token verification
-- **Bot behaviour** — `use Hotline.Bot` for quick PubSub-driven bots
-- **Access control** — Restrict bots to specific user IDs with `allowed_ids`
-- **Streaming** — Lazy `Stream.resource` for IEx exploration
-- **Broadway** — Optional `Hotline.BroadwayProducer` for pipeline processing
-- **Code generator** — `mix hotline.gen` fetches the official API spec and generates all types and methods
-- **Telemetry** — `[:hotline, :request, :start | :stop]` and `[:hotline, :update, :received]` events
-- **No Jason dependency** — Uses Elixir 1.18+ native `JSON` module
+| | |
+|---|---|
+| **Type-safe** | Parsed Telegram types with nested struct resolution |
+| **Long-polling** | Built-in `Hotline.Poller` with offset tracking, 409/429 handling |
+| **Webhooks** | `Hotline.Webhook` Plug with secret token verification |
+| **Bot behaviour** | `use Hotline.Bot` for quick PubSub-driven bots |
+| **Access control** | Restrict bots to specific user IDs via `allowed_ids` |
+| **Streaming** | Lazy `Stream.resource` for IEx exploration |
+| **Broadway** | Optional `Hotline.BroadwayProducer` for pipeline processing |
+| **Code generator** | `mix hotline.gen` generates types and methods from the official API spec |
+| **Telemetry** | Request and update events out of the box |
+| **Native JSON** | Uses Elixir 1.18+ built-in `JSON` module — no Jason dependency |
 
 ## Installation
 
@@ -27,61 +33,62 @@ def deps do
 end
 ```
 
+Requires **Elixir ~> 1.18**.
+
 ## Configuration
 
-Configure via application environment, system environment variables, or runtime options:
+Three ways to configure, in priority order:
 
 ```elixir
+# 1. Runtime options (highest priority)
+Hotline.get_me(token: "your-bot-token")
+
+# 2. Application environment
 # config/config.exs
 config :hotline,
   token: "your-bot-token"
+
+# 3. System environment variables
+# export HOTLINE_TOKEN="your-bot-token"
 ```
 
-Or use environment variables:
-
-```sh
-export HOTLINE_TOKEN="your-bot-token"
-```
-
-Or pass options directly to any function:
-
-```elixir
-Hotline.get_me(token: "your-bot-token")
-```
-
-Resolution order: **opts > app env > system env > defaults**.
-
-## Usage
-
-### Quick start in IEx
+## Quick Start
 
 ```sh
 HOTLINE_TOKEN="your-bot-token" iex -S mix
 ```
 
 ```elixir
-# Get bot info
-{:ok, me} = Hotline.get_me()
+# Verify your bot
+iex> {:ok, me} = Hotline.get_me()
+{:ok, %Hotline.Types.User{first_name: "MyBot", ...}}
 
-# Send a message (find your chat_id first)
-[update] = Hotline.stream() |> Enum.take(1)
-chat_id = update.message.chat.id
+# Find your chat_id — send a message to your bot in Telegram, then:
+iex> [update] = Hotline.stream() |> Enum.take(1)
+iex> chat_id = update.message.chat.id
+7644580464
 
-{:ok, msg} = Hotline.send_message(%{chat_id: chat_id, text: "Hello from Hotline!"})
-
-# Stream updates
-Hotline.stream() |> Enum.each(&IO.inspect/1)
+# Send a message
+iex> Hotline.send_message(%{chat_id: chat_id, text: "Hello from Hotline!"})
+{:ok, %Hotline.Types.Message{...}}
 ```
 
-### Bot behaviour
+## Building a Bot
+
+Define a bot module with `use Hotline.Bot` and implement `handle_update/2`:
 
 ```elixir
 defmodule MyBot do
   use Hotline.Bot
 
   @impl Hotline.Bot
-  def handle_update(%{message: %{text: "/start"}} = _update, state) do
-    Hotline.send_message(%{chat_id: state.chat_id, text: "Hello!"})
+  def handle_update(%{message: %{text: "/start", chat: %{id: chat_id}}}, state) do
+    Hotline.send_message(%{chat_id: chat_id, text: "Welcome! Try /help"})
+    {:noreply, state}
+  end
+
+  def handle_update(%{message: %{text: "/ping", chat: %{id: chat_id}}}, state) do
+    Hotline.send_message(%{chat_id: chat_id, text: "Pong!"})
     {:noreply, state}
   end
 
@@ -95,12 +102,14 @@ Add the poller and bot to your supervision tree:
 
 ```elixir
 children = [
-  {Hotline.Poller, token: "your-token"},
+  {Hotline.Poller, []},
   {MyBot, []}
 ]
+
+Supervisor.start_link(children, strategy: :one_for_one)
 ```
 
-### Restricting access by user ID
+### Restricting Access
 
 Only accept updates from specific Telegram user IDs:
 
@@ -110,56 +119,63 @@ Only accept updates from specific Telegram user IDs:
 
 # Multiple users
 {MyBot, allowed_ids: [7644580464, 123456789]}
+
+# Everyone (default)
+{MyBot, []}
 ```
 
-Updates from other users are silently dropped. Omit `allowed_ids` to accept everyone.
+Updates from non-allowed users are silently dropped.
 
-### Webhooks
+## Webhooks
 
 Use `Hotline.Webhook` as a Plug, or deploy standalone with Bandit:
 
 ```elixir
-# In your supervision tree
-{Bandit, plug: Hotline.Webhook.Router, port: 4000}
+children = [
+  {Bandit, plug: Hotline.Webhook.Router, port: 4000},
+  {MyBot, []}
+]
 ```
 
-Configure a secret token for verification:
+With secret token verification:
 
 ```elixir
 config :hotline,
   webhook_secret: "your-secret-token"
 ```
 
-### Sending files
+## Sending Files
 
 ```elixir
-# From file path
+# From a file path
 Hotline.send_photo(%{chat_id: chat_id, photo: {:file, "/path/to/photo.jpg"}})
 
 # From binary content
-Hotline.send_document(%{chat_id: chat_id, document: {:file_content, binary_data, "report.pdf"}})
+Hotline.send_document(%{chat_id: chat_id, document: {:file_content, pdf_binary, "report.pdf"}})
 ```
 
-### Code generator
+## Code Generator
 
-Generate all Telegram API types and methods from the official spec:
+Generate all Telegram API types and methods from the [official spec](https://github.com/PaulSonOfLars/telegram-bot-api-spec):
 
 ```sh
 mix hotline.gen
 mix format
 ```
 
-This creates type modules in `lib/hotline/types/` and a `Hotline.GeneratedAPI` module with all API methods.
+This creates full type modules in `lib/hotline/types/` and a `Hotline.GeneratedAPI` module with every API method, complete with typespecs and docs.
 
 ## Examples
 
-See the [`examples/`](examples/) directory for runnable examples:
+See the [`examples/`](examples/) directory:
 
-- [`echo_bot.exs`](examples/echo_bot.exs) — Simple echo bot
-- [`greeter_bot.exs`](examples/greeter_bot.exs) — Greeter with command handling
-- [`stream_logger.exs`](examples/stream_logger.exs) — Log updates via streaming
+| Example | Description |
+|---------|-------------|
+| [`echo_bot.exs`](examples/echo_bot.exs) | Echoes back whatever the user sends |
+| [`greeter_bot.exs`](examples/greeter_bot.exs) | Handles `/start`, `/help`, `/ping`, `/whoami` commands |
+| [`stream_logger.exs`](examples/stream_logger.exs) | Logs incoming updates to the console via streaming |
 
-Run any example with:
+Run any example:
 
 ```sh
 HOTLINE_TOKEN="your-bot-token" mix run examples/echo_bot.exs
@@ -167,4 +183,4 @@ HOTLINE_TOKEN="your-bot-token" mix run examples/echo_bot.exs
 
 ## License
 
-MIT
+[MIT](LICENSE)
