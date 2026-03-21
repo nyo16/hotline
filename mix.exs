@@ -50,7 +50,7 @@ defmodule Hotline.MixProject do
   defp docs do
     [
       main: "Hotline",
-      extras: ["README.md", "CHANGELOG.md", "LICENSE"] ++ Path.wildcard("examples/*.exs")
+      extras: ["README.md", "CHANGELOG.md", "LICENSE"]
     ]
   end
 

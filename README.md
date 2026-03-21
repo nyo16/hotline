@@ -301,15 +301,15 @@ This creates full type modules in `lib/hotline/types/` and a `Hotline.GeneratedA
 
 ## Examples
 
-See the [`examples/`](examples/) directory:
+See the [`examples/`](https://github.com/nyo16/hotline/tree/master/examples) directory:
 
 | Example | Description |
 |---------|-------------|
-| [`echo_bot.exs`](examples/echo_bot.exs) | Echoes back whatever the user sends |
-| [`greeter_bot.exs`](examples/greeter_bot.exs) | Handles `/start`, `/help`, `/ping`, `/whoami` commands |
-| [`flow_bot.exs`](examples/flow_bot.exs) | Multi-step flows: registration, feedback, and settings |
-| [`stream_logger.exs`](examples/stream_logger.exs) | Logs incoming updates to the console via streaming |
-| [`broadway_pipeline.exs`](examples/broadway_pipeline.exs) | Process updates through a Broadway pipeline |
+| [`echo_bot.exs`](https://github.com/nyo16/hotline/blob/master/examples/echo_bot.exs) | Echoes back whatever the user sends |
+| [`greeter_bot.exs`](https://github.com/nyo16/hotline/blob/master/examples/greeter_bot.exs) | Handles `/start`, `/help`, `/ping`, `/whoami` commands |
+| [`flow_bot.exs`](https://github.com/nyo16/hotline/blob/master/examples/flow_bot.exs) | Multi-step flows: registration, feedback, and settings |
+| [`stream_logger.exs`](https://github.com/nyo16/hotline/blob/master/examples/stream_logger.exs) | Logs incoming updates to the console via streaming |
+| [`broadway_pipeline.exs`](https://github.com/nyo16/hotline/blob/master/examples/broadway_pipeline.exs) | Process updates through a Broadway pipeline |
 
 Run any example:
 
