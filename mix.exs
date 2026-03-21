@@ -48,7 +48,7 @@ defmodule Hotline.MixProject do
   defp docs do
     [
       main: "Hotline",
-      extras: ["README.md", "CHANGELOG.md", "LICENSE"]
+      extras: ["README.md", "CHANGELOG.md", "LICENSE"] ++ Path.wildcard("examples/*.exs")
     ]
   end
 
@@ -56,7 +56,7 @@ defmodule Hotline.MixProject do
     [
       licenses: ["MIT"],
       links: %{"GitHub" => @source_url},
-      files: ~w(lib priv .formatter.exs mix.exs README.md LICENSE CHANGELOG.md)
+      files: ~w(lib priv examples .formatter.exs mix.exs README.md LICENSE CHANGELOG.md)
     ]
   end
 end
