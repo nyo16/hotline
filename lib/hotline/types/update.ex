@@ -3,6 +3,8 @@ defmodule Hotline.Types.Update do
 
   use Hotline.Type
 
+  alias Hotline.Types.{CallbackQuery, Message}
+
   defstruct [
     :update_id,
     :message,
@@ -23,11 +25,11 @@ defmodule Hotline.Types.Update do
 
   @type t :: %__MODULE__{
           update_id: integer(),
-          message: Hotline.Types.Message.t() | nil,
-          edited_message: Hotline.Types.Message.t() | nil,
-          channel_post: Hotline.Types.Message.t() | nil,
-          edited_channel_post: Hotline.Types.Message.t() | nil,
-          callback_query: Hotline.Types.CallbackQuery.t() | nil,
+          message: Message.t() | nil,
+          edited_message: Message.t() | nil,
+          channel_post: Message.t() | nil,
+          edited_channel_post: Message.t() | nil,
+          callback_query: CallbackQuery.t() | nil,
           inline_query: map() | nil,
           chosen_inline_result: map() | nil,
           shipping_query: map() | nil,
@@ -41,11 +43,11 @@ defmodule Hotline.Types.Update do
 
   def parse_nested(_map) do
     %{
-      message: &Hotline.Types.Message.parse/1,
-      edited_message: &Hotline.Types.Message.parse/1,
-      channel_post: &Hotline.Types.Message.parse/1,
-      edited_channel_post: &Hotline.Types.Message.parse/1,
-      callback_query: &Hotline.Types.CallbackQuery.parse/1
+      message: &Message.parse/1,
+      edited_message: &Message.parse/1,
+      channel_post: &Message.parse/1,
+      edited_channel_post: &Message.parse/1,
+      callback_query: &CallbackQuery.parse/1
     }
   end
 end

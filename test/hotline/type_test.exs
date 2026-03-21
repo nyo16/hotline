@@ -1,7 +1,7 @@
 defmodule Hotline.TypeTest do
   use ExUnit.Case, async: true
 
-  alias Hotline.Types.{User, Chat, Message, CallbackQuery, Update}
+  alias Hotline.Types.{CallbackQuery, Chat, Message, Update, User}
 
   describe "User.parse/1" do
     test "parses a user map" do

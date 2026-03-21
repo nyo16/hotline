@@ -40,43 +40,48 @@ defmodule Hotline.Poller do
 
     case Client.request("getUpdates", params, opts) do
       {:ok, updates} when is_list(updates) ->
-        parsed = Enum.map(updates, &Update.parse/1)
-
-        for update <- parsed do
-          :telemetry.execute([:hotline, :update, :received], %{}, %{update_id: update.update_id})
-          Phoenix.PubSub.broadcast(Hotline.PubSub, "hotline:updates", {:hotline_update, update})
-        end
-
-        new_offset =
-          case parsed do
-            [] -> state.offset
-            _ -> List.last(parsed).update_id + 1
-          end
-
-        schedule_poll(state.poll_interval)
-        {:noreply, %{state | offset: new_offset}}
-
-      {:error, %Error{code: 409}} ->
-        schedule_poll(5_000)
-        {:noreply, state}
+        handle_updates(updates, state)
 
       {:error, %Error{} = error} ->
-        backoff =
-          case Error.retry_after(error) do
-            nil -> 1_000
-            seconds -> seconds * 1_000
-          end
-
-        schedule_poll(backoff)
-        {:noreply, state}
-
-      {:error, _} ->
-        schedule_poll(1_000)
-        {:noreply, state}
+        handle_poll_error(error, state)
     end
   end
 
   def handle_info(_msg, state), do: {:noreply, state}
+
+  defp handle_updates(updates, state) do
+    parsed = Enum.map(updates, &Update.parse/1)
+
+    for update <- parsed do
+      :telemetry.execute([:hotline, :update, :received], %{}, %{update_id: update.update_id})
+      Phoenix.PubSub.broadcast(Hotline.PubSub, "hotline:updates", {:hotline_update, update})
+    end
+
+    new_offset =
+      case parsed do
+        [] -> state.offset
+        _ -> List.last(parsed).update_id + 1
+      end
+
+    schedule_poll(state.poll_interval)
+    {:noreply, %{state | offset: new_offset}}
+  end
+
+  defp handle_poll_error(%Error{code: 409}, state) do
+    schedule_poll(5_000)
+    {:noreply, state}
+  end
+
+  defp handle_poll_error(%Error{} = error, state) do
+    backoff =
+      case Error.retry_after(error) do
+        nil -> 1_000
+        seconds -> seconds * 1_000
+      end
+
+    schedule_poll(backoff)
+    {:noreply, state}
+  end
 
   defp schedule_poll(interval) do
     Process.send_after(self(), :poll, interval)
