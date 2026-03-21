@@ -14,6 +14,7 @@ Hotline gives you everything you need to build Telegram bots in Elixir — from 
 | **Long-polling** | Built-in `Hotline.Poller` with offset tracking, 409/429 handling |
 | **Webhooks** | `Hotline.Webhook` Plug with secret token verification |
 | **Bot behaviour** | `use Hotline.Bot` for quick PubSub-driven bots |
+| **Conversation flows** | Declarative DSL for multi-step conversations with validation and branching |
 | **Access control** | Restrict bots to specific user IDs via `allowed_ids` |
 | **Streaming** | Lazy `Stream.resource` for IEx exploration |
 | **Broadway** | Optional `Hotline.BroadwayProducer` for pipeline processing |
@@ -153,6 +154,112 @@ Hotline.ChatRegistry.get(7644580464) # lookup by chat_id
 Hotline.ChatRegistry.count()         # total count
 ```
 
+## Conversation Flows
+
+Build multi-step conversations with the Flow DSL. Define steps declaratively, handle input with pattern matching, and let the Engine manage state per chat.
+
+### Defining a Flow
+
+```elixir
+defmodule MyBot.Flows.Registration do
+  use Hotline.Flow
+
+  step :name, prompt: "What's your name?"
+  step :email, prompt: fn ctx -> "Thanks #{ctx.data.name}! What's your email?" end
+  step :confirm,
+    prompt: fn ctx -> "Confirm? Name: #{ctx.data.name}" end,
+    keyboard: [[%{text: "Yes", callback_data: "yes"}, %{text: "No", callback_data: "no"}]]
+
+  @impl true
+  def handle_input(:name, %{message: %{text: name}}, _ctx) when byte_size(name) >= 2 do
+    {:next, store: %{name: name}}
+  end
+  def handle_input(:name, _, _ctx), do: {:retry, "Name must be at least 2 characters."}
+
+  def handle_input(:email, %{message: %{text: email}}, _ctx) do
+    {:next, store: %{email: email}}
+  end
+
+  def handle_input(:confirm, %{callback_query: %{data: "yes"}}, _ctx), do: :done
+  def handle_input(:confirm, %{callback_query: %{data: "no"}}, _ctx), do: {:goto, :name, reset: true}
+  def handle_input(:confirm, _, _ctx), do: {:retry, "Use the buttons."}
+
+  @impl true
+  def on_done(ctx) do
+    Hotline.send_message(%{chat_id: ctx.chat_id, text: "Registered: #{ctx.data.name}"})
+  end
+end
+```
+
+`handle_input/3` return values control the flow:
+
+| Return | Effect |
+|--------|--------|
+| `{:next, store: %{k: v}}` | Merge data and advance to next step |
+| `:next` | Advance without storing data |
+| `{:goto, :step}` | Jump to a named step |
+| `{:goto, :step, reset: true}` | Jump and clear accumulated data |
+| `{:retry, "message"}` | Stay on current step, send error message |
+| `:done` / `{:done, result}` | Complete the flow |
+| `:cancel` | Cancel the flow |
+
+### Running Flows
+
+Add `Hotline.Flow.Engine` to your supervision tree and trigger flows from your bot:
+
+```elixir
+children = [
+  {Hotline.Poller, []},
+  {Hotline.Flow.Engine, []},
+  {MyBot, []}
+]
+```
+
+```elixir
+defmodule MyBot do
+  use Hotline.Bot
+
+  @impl Hotline.Bot
+  def handle_update(%{message: %{text: "/register", chat: %{id: chat_id}}}, state) do
+    Hotline.Flow.Engine.start_flow(chat_id, MyBot.Flows.Registration)
+    {:noreply, state}
+  end
+
+  def handle_update(%{message: %{text: "/cancel", chat: %{id: chat_id}}}, state) do
+    Hotline.Flow.Engine.cancel_flow(chat_id)
+    {:noreply, state}
+  end
+
+  def handle_update(%{message: %{text: text, chat: %{id: chat_id}}} = update, state)
+      when is_binary(text) do
+    unless Hotline.Flow.Engine.handles_update?(update) do
+      Hotline.send_message(%{chat_id: chat_id, text: "Try /register or /help"})
+    end
+    {:noreply, state}
+  end
+
+  def handle_update(_update, state), do: {:noreply, state}
+end
+```
+
+### Inline Keyboards in Flows
+
+Pass `keyboard:` to any step to send inline buttons with the prompt:
+
+```elixir
+step :rating,
+  prompt: "Rate your experience:",
+  keyboard: [
+    [%{text: "1", callback_data: "1"}, %{text: "2", callback_data: "2"},
+     %{text: "3", callback_data: "3"}, %{text: "4", callback_data: "4"},
+     %{text: "5", callback_data: "5"}]
+  ]
+
+def handle_input(:rating, %{callback_query: %{data: rating}}, _ctx) do
+  {:next, store: %{rating: String.to_integer(rating)}}
+end
+```
+
 ## Webhooks
 
 Use `Hotline.Webhook` as a Plug, or deploy standalone with Bandit:
@@ -200,6 +307,7 @@ See the [`examples/`](examples/) directory:
 |---------|-------------|
 | [`echo_bot.exs`](examples/echo_bot.exs) | Echoes back whatever the user sends |
 | [`greeter_bot.exs`](examples/greeter_bot.exs) | Handles `/start`, `/help`, `/ping`, `/whoami` commands |
+| [`flow_bot.exs`](examples/flow_bot.exs) | Multi-step flows: registration, feedback, and settings |
 | [`stream_logger.exs`](examples/stream_logger.exs) | Logs incoming updates to the console via streaming |
 | [`broadway_pipeline.exs`](examples/broadway_pipeline.exs) | Process updates through a Broadway pipeline |
 
