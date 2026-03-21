@@ -97,45 +97,27 @@ defmodule Hotline.Flow do
     * `:keyboard` — inline keyboard markup (list of button rows) sent with the prompt
   """
   defmacro step(name, opts \\ []) do
-    prompt = Keyword.get(opts, :prompt)
-    keyboard = Keyword.get(opts, :keyboard)
-
-    prompt_clause =
-      case prompt do
-        nil ->
-          nil
-
-        text when is_binary(text) ->
-          quote do
-            def __prompt__(unquote(name), _flow_ctx), do: unquote(text)
-          end
-
-        _fn_ast ->
-          quote do
-            def __prompt__(unquote(name), flow_ctx), do: unquote(prompt).(flow_ctx)
-          end
-      end
-
-    keyboard_clause =
-      case keyboard do
-        nil ->
-          nil
-
-        list when is_list(list) ->
-          quote do
-            def __keyboard__(unquote(name), _flow_ctx), do: unquote(keyboard)
-          end
-
-        _fn_ast ->
-          quote do
-            def __keyboard__(unquote(name), flow_ctx), do: unquote(keyboard).(flow_ctx)
-          end
-      end
+    prompt_clause = build_step_clause(:__prompt__, name, Keyword.get(opts, :prompt))
+    keyboard_clause = build_step_clause(:__keyboard__, name, Keyword.get(opts, :keyboard))
 
     quote do
       @hotline_step_names unquote(name)
       unquote(prompt_clause)
       unquote(keyboard_clause)
+    end
+  end
+
+  defp build_step_clause(_fun, _name, nil), do: nil
+
+  defp build_step_clause(fun, name, value) when is_binary(value) or is_list(value) do
+    quote do
+      def unquote(fun)(unquote(name), _flow_ctx), do: unquote(value)
+    end
+  end
+
+  defp build_step_clause(fun, name, fn_ast) do
+    quote do
+      def unquote(fun)(unquote(name), flow_ctx), do: unquote(fn_ast).(flow_ctx)
     end
   end
 

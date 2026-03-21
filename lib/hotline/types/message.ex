@@ -3,6 +3,8 @@ defmodule Hotline.Types.Message do
 
   use Hotline.Type
 
+  alias Hotline.Types.{Chat, User}
+
   defstruct [
     :message_id,
     :message_thread_id,
@@ -22,10 +24,10 @@ defmodule Hotline.Types.Message do
   @type t :: %__MODULE__{
           message_id: integer(),
           message_thread_id: integer() | nil,
-          from: Hotline.Types.User.t() | nil,
-          sender_chat: Hotline.Types.Chat.t() | nil,
+          from: User.t() | nil,
+          sender_chat: Chat.t() | nil,
           date: integer(),
-          chat: Hotline.Types.Chat.t(),
+          chat: Chat.t(),
           text: String.t() | nil,
           reply_to_message: t() | nil,
           photo: list() | nil,
@@ -37,10 +39,10 @@ defmodule Hotline.Types.Message do
 
   def parse_nested(_map) do
     %{
-      from: &Hotline.Types.User.parse/1,
-      sender_chat: &Hotline.Types.Chat.parse/1,
-      chat: &Hotline.Types.Chat.parse/1,
-      reply_to_message: &Hotline.Types.Message.parse/1
+      from: &User.parse/1,
+      sender_chat: &Chat.parse/1,
+      chat: &Chat.parse/1,
+      reply_to_message: &parse/1
     }
   end
 end

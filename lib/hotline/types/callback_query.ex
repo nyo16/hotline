@@ -3,6 +3,8 @@ defmodule Hotline.Types.CallbackQuery do
 
   use Hotline.Type
 
+  alias Hotline.Types.{Message, User}
+
   defstruct [
     :id,
     :from,
@@ -15,8 +17,8 @@ defmodule Hotline.Types.CallbackQuery do
 
   @type t :: %__MODULE__{
           id: String.t(),
-          from: Hotline.Types.User.t(),
-          message: Hotline.Types.Message.t() | nil,
+          from: User.t(),
+          message: Message.t() | nil,
           inline_message_id: String.t() | nil,
           chat_instance: String.t(),
           data: String.t() | nil,
@@ -25,8 +27,8 @@ defmodule Hotline.Types.CallbackQuery do
 
   def parse_nested(_map) do
     %{
-      from: &Hotline.Types.User.parse/1,
-      message: &Hotline.Types.Message.parse/1
+      from: &User.parse/1,
+      message: &Message.parse/1
     }
   end
 end
