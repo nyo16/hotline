@@ -124,16 +124,32 @@ defmodule Hotline.Flow do
   defmacro __before_compile__(env) do
     step_names = Module.get_attribute(env.module, :hotline_step_names) |> Enum.reverse()
 
+    has_on_done = Module.defines?(env.module, {:on_done, 1})
+    has_on_cancel = Module.defines?(env.module, {:on_cancel, 1})
+
     quote do
       def __steps__, do: unquote(step_names)
 
       def __prompt__(_step, _flow_ctx), do: nil
       def __keyboard__(_step, _flow_ctx), do: nil
 
-      def on_done(_ctx), do: :ok
-      def on_cancel(_ctx), do: :ok
+      unquote(
+        unless has_on_done do
+          quote do
+            def on_done(_ctx), do: :ok
+            defoverridable on_done: 1
+          end
+        end
+      )
 
-      defoverridable on_done: 1, on_cancel: 1
+      unquote(
+        unless has_on_cancel do
+          quote do
+            def on_cancel(_ctx), do: :ok
+            defoverridable on_cancel: 1
+          end
+        end
+      )
     end
   end
 end

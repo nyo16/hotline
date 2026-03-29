@@ -57,7 +57,9 @@ defmodule Hotline.FlowTest do
     @impl true
     def handle_input(:ask, _update, _ctx), do: :done
 
+    @impl true
     def on_done(ctx), do: {:completed, ctx.data}
+    @impl true
     def on_cancel(_ctx), do: :cancelled
   end
 

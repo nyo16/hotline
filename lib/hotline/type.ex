@@ -26,6 +26,14 @@ defmodule Hotline.Type do
   @callback parse(map() | nil) :: struct() | nil
   @callback parse_nested(map()) :: map()
 
+  @doc false
+  def apply_nested(nested, key, raw) do
+    case Map.get(nested, key) do
+      parser when is_function(parser, 1) and not is_nil(raw) -> parser.(raw)
+      _ -> raw
+    end
+  end
+
   defmacro __using__(_opts) do
     quote do
       @behaviour Hotline.Type
@@ -45,13 +53,7 @@ defmodule Hotline.Type do
           for key <- known_keys, into: %{} do
             str_key = Atom.to_string(key)
             raw = Map.get(map, str_key)
-
-            value =
-              case Map.get(nested, key) do
-                parser when is_function(parser, 1) and not is_nil(raw) -> parser.(raw)
-                _ -> raw
-              end
-
+            value = Hotline.Type.apply_nested(nested, key, raw)
             {key, value}
           end
 
