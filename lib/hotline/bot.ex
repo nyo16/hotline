@@ -303,56 +303,10 @@ defmodule Hotline.Bot do
     handlers = Module.get_attribute(env.module, :hotline_handlers) |> Enum.reverse()
     allowed_ids = Module.get_attribute(env.module, :hotline_allowed_ids) |> Enum.reverse()
 
-    has_custom_handle_update = Module.defines?(env.module, {:handle_update, 2})
-
+    has_custom = Module.defines?(env.module, {:handle_update, 2})
     has_dsl = commands != [] or handlers != []
 
-    command_dispatch = build_command_dispatch(commands)
-    type_dispatch = build_type_dispatch(handlers)
-
-    handle_update_def =
-      cond do
-        has_custom_handle_update and has_dsl ->
-          # DSL dispatch first, fall back to user's manual handle_update via super
-          quote do
-            defoverridable handle_update: 2
-
-            @impl Hotline.Bot
-            def handle_update(update, state) do
-              case __dispatch_command__(update, state) do
-                {:__not_handled__, fallback_state} -> super(update, fallback_state)
-                result -> result
-              end
-            end
-          end
-
-        has_custom_handle_update ->
-          # No DSL, user's handle_update is used directly (nothing to generate)
-          nil
-
-        not has_dsl ->
-          # No DSL and no custom handle_update — simple passthrough
-          quote do
-            @impl Hotline.Bot
-            def handle_update(_update, state), do: {:noreply, state}
-
-            defoverridable handle_update: 2
-          end
-
-        true ->
-          # DSL handlers exist, no custom handle_update — delegate to dispatch
-          quote do
-            @impl Hotline.Bot
-            def handle_update(update, state) do
-              case __dispatch_command__(update, state) do
-                {:__not_handled__, fallback_state} -> {:noreply, fallback_state}
-                result -> result
-              end
-            end
-
-            defoverridable handle_update: 2
-          end
-      end
+    handle_update_def = build_handle_update(has_custom, has_dsl)
 
     quote do
       @doc false
@@ -364,13 +318,52 @@ defmodule Hotline.Bot do
       @doc false
       def __declared_allowed_ids__, do: unquote(Macro.escape(allowed_ids))
 
-      unquote(command_dispatch)
-      unquote(type_dispatch)
+      unquote(build_command_dispatch(commands))
+      unquote(build_type_dispatch(handlers))
       unquote(handle_update_def)
     end
   end
 
   # -- Compile-time helpers (private functions, not macros) --
+
+  defp build_handle_update(true = _has_custom, true = _has_dsl) do
+    # DSL dispatch first, fall back to user's manual handle_update via super
+    quote do
+      defoverridable handle_update: 2
+
+      @impl Hotline.Bot
+      def handle_update(update, state) do
+        case __dispatch_command__(update, state) do
+          {:__not_handled__, fallback_state} -> super(update, fallback_state)
+          result -> result
+        end
+      end
+    end
+  end
+
+  defp build_handle_update(true = _has_custom, false = _has_dsl), do: nil
+
+  defp build_handle_update(false = _has_custom, false = _has_dsl) do
+    quote do
+      @impl Hotline.Bot
+      def handle_update(_update, state), do: {:noreply, state}
+      defoverridable handle_update: 2
+    end
+  end
+
+  defp build_handle_update(false = _has_custom, true = _has_dsl) do
+    quote do
+      @impl Hotline.Bot
+      def handle_update(update, state) do
+        case __dispatch_command__(update, state) do
+          {:__not_handled__, fallback_state} -> {:noreply, fallback_state}
+          result -> result
+        end
+      end
+
+      defoverridable handle_update: 2
+    end
+  end
 
   defp cmd_to_func_name(cmd_string) do
     name =
