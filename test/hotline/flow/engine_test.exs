@@ -20,7 +20,9 @@ defmodule Hotline.Flow.EngineTest do
     def handle_input(:confirm, %{message: %{text: "yes"}}, _ctx), do: :done
     def handle_input(:confirm, _, _ctx), do: {:retry, "Say yes."}
 
+    @impl true
     def on_done(ctx), do: send(ctx.opts[:test_pid], {:flow_done, ctx.data})
+    @impl true
     def on_cancel(ctx), do: send(ctx.opts[:test_pid], :flow_cancelled)
   end
 

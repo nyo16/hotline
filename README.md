@@ -14,8 +14,9 @@ Hotline gives you everything you need to build Telegram bots in Elixir — from 
 | **Long-polling** | Built-in `Hotline.Poller` with offset tracking, 409/429 handling |
 | **Webhooks** | `Hotline.Webhook` Plug with secret token verification |
 | **Bot behaviour** | `use Hotline.Bot` for quick PubSub-driven bots |
+| **Bot DSL** | Declarative `command` and `on` macros for routing updates |
 | **Conversation flows** | Declarative DSL for multi-step conversations with validation and branching |
-| **Access control** | Restrict bots to specific user IDs via `allowed_ids` |
+| **Access control** | Restrict bots to specific user IDs via `allow` or `allowed_ids` |
 | **Streaming** | Lazy `Stream.resource` for IEx exploration |
 | **Broadway** | Optional `Hotline.BroadwayProducer` for pipeline processing |
 | **Code generator** | `mix hotline.gen` generates types and methods from the official API spec |
@@ -76,7 +77,52 @@ iex> Hotline.send_message(%{chat_id: chat_id, text: "Hello from Hotline!"})
 
 ## Building a Bot
 
-Define a bot module with `use Hotline.Bot` and implement `handle_update/2`:
+### Using the Bot DSL (Recommended)
+
+The Bot DSL provides declarative macros for defining command handlers and
+update-type handlers:
+
+```elixir
+defmodule MyBot do
+  use Hotline.Bot
+
+  command "/start" do
+    Hotline.send_message(%{chat_id: chat_id, text: "Welcome! Try /help"})
+  end
+
+  command "/ping" do
+    Hotline.send_message(%{chat_id: chat_id, text: "Pong!"})
+  end
+
+  command "/echo" do
+    text = if args == "", do: "Usage: /echo <text>", else: args
+    Hotline.send_message(%{chat_id: chat_id, text: text})
+  end
+
+  on :message do
+    Hotline.send_message(%{chat_id: chat_id, text: "Unknown command. Try /help"})
+  end
+
+  on :callback_query do
+    Hotline.answer_callback_query(%{callback_query_id: callback_query.id})
+  end
+end
+```
+
+**Dispatch priority:** `command` handlers are checked first, then `on` type handlers, then any manual `handle_update/2` fallback. Handlers that return `{:noreply, new_state}` propagate the new state; any other return defaults to `{:noreply, state}`.
+
+**Available bindings:**
+
+| Context | Variables |
+|---------|-----------|
+| `command` blocks | `update`, `state`, `chat_id`, `args` |
+| `on` blocks | `update`, `state`, `chat_id`, + type variable (e.g. `message`, `callback_query`) |
+
+Commands automatically handle `@botname` suffixes (e.g. `/start@mybot` matches `/start`).
+
+### Manual Approach
+
+For full control, implement `handle_update/2` directly:
 
 ```elixir
 defmodule MyBot do
@@ -88,16 +134,15 @@ defmodule MyBot do
     {:noreply, state}
   end
 
-  def handle_update(%{message: %{text: "/ping", chat: %{id: chat_id}}}, state) do
-    Hotline.send_message(%{chat_id: chat_id, text: "Pong!"})
-    {:noreply, state}
-  end
-
   def handle_update(_update, state) do
     {:noreply, state}
   end
 end
 ```
+
+You can also combine both — DSL handlers run first, unmatched updates fall through to `handle_update/2`.
+
+### Starting a Bot
 
 Add the poller and bot to your supervision tree:
 
@@ -112,20 +157,30 @@ Supervisor.start_link(children, strategy: :one_for_one)
 
 ### Restricting Access
 
-Only accept updates from specific Telegram user IDs:
+Restrict at the module level with `allow`, at runtime with `allowed_ids`, or both:
 
 ```elixir
-# Single user
+# Declarative (compile-time)
+defmodule MyBot do
+  use Hotline.Bot
+  allow [7644580464, 123456789]
+
+  # Or resolve from application config:
+  # allow {:config, :my_bot_allowed_ids}
+
+  command "/start" do
+    Hotline.send_message(%{chat_id: chat_id, text: "Hello!"})
+  end
+end
+
+# Runtime
 {MyBot, allowed_ids: [7644580464]}
 
-# Multiple users
-{MyBot, allowed_ids: [7644580464, 123456789]}
-
-# Everyone (default)
+# Everyone (default — omit allow and allowed_ids)
 {MyBot, []}
 ```
 
-Updates from non-allowed users are silently dropped.
+Compile-time and runtime IDs are merged. Updates from non-allowed users are silently dropped.
 
 ### Chat Registry
 
@@ -219,26 +274,19 @@ children = [
 defmodule MyBot do
   use Hotline.Bot
 
-  @impl Hotline.Bot
-  def handle_update(%{message: %{text: "/register", chat: %{id: chat_id}}}, state) do
+  command "/register" do
     Hotline.Flow.Engine.start_flow(chat_id, MyBot.Flows.Registration)
-    {:noreply, state}
   end
 
-  def handle_update(%{message: %{text: "/cancel", chat: %{id: chat_id}}}, state) do
+  command "/cancel" do
     Hotline.Flow.Engine.cancel_flow(chat_id)
-    {:noreply, state}
   end
 
-  def handle_update(%{message: %{text: text, chat: %{id: chat_id}}} = update, state)
-      when is_binary(text) do
+  on :message do
     unless Hotline.Flow.Engine.handles_update?(update) do
       Hotline.send_message(%{chat_id: chat_id, text: "Try /register or /help"})
     end
-    {:noreply, state}
   end
-
-  def handle_update(_update, state), do: {:noreply, state}
 end
 ```
 
@@ -305,6 +353,7 @@ See the [`examples/`](https://github.com/nyo16/hotline/tree/master/examples) dir
 
 | Example | Description |
 |---------|-------------|
+| [`dsl_bot.exs`](https://github.com/nyo16/hotline/blob/master/examples/dsl_bot.exs) | Declarative bot using `command` and `on` macros |
 | [`echo_bot.exs`](https://github.com/nyo16/hotline/blob/master/examples/echo_bot.exs) | Echoes back whatever the user sends |
 | [`greeter_bot.exs`](https://github.com/nyo16/hotline/blob/master/examples/greeter_bot.exs) | Handles `/start`, `/help`, `/ping`, `/whoami` commands |
 | [`flow_bot.exs`](https://github.com/nyo16/hotline/blob/master/examples/flow_bot.exs) | Multi-step flows: registration, feedback, and settings |
