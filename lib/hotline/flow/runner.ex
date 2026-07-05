@@ -104,6 +104,8 @@ defmodule Hotline.Flow.Runner do
   defp next_step(flow_module, current_step) do
     steps = flow_module.__steps__()
 
+    # O(n) scan per transition — fine because __steps__/0 is a small, compile-time
+    # list of step names (a flow has a handful of steps, not thousands).
     case Enum.drop_while(steps, &(&1 != current_step)) do
       [^current_step, next | _] -> {:ok, next}
       _ -> :done

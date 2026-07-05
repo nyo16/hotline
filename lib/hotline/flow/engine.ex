@@ -54,8 +54,16 @@ defmodule Hotline.Flow.Engine do
     GenServer.start_link(__MODULE__, opts, name: name)
   end
 
-  @doc "Start a flow for a chat. Returns `{:error, :flow_active}` if one is already running."
-  @spec start_flow(integer(), module(), map(), GenServer.server()) :: :ok | {:error, :flow_active}
+  @doc """
+  Start a flow for a chat.
+
+  Returns `{:error, :flow_active}` if one is already running, or
+  `{:error, :flow_start_failed}` if the `flow_module` raises while starting
+  (e.g. a module that does not `use Hotline.Flow`). A failed start never
+  crashes the Engine, so other chats' in-flight flows are unaffected.
+  """
+  @spec start_flow(integer(), module(), map(), GenServer.server()) ::
+          :ok | {:error, :flow_active | :flow_start_failed}
   def start_flow(chat_id, flow_module, opts \\ %{}, engine \\ __MODULE__) do
     GenServer.call(engine, {:start_flow, chat_id, flow_module, opts})
   end
@@ -88,8 +96,9 @@ defmodule Hotline.Flow.Engine do
     Phoenix.PubSub.subscribe(Hotline.PubSub, "hotline:updates")
 
     sender = opts[:sender] || (&Hotline.send_message/2)
+    answer_callback = opts[:answer_callback] || (&Hotline.answer_callback_query/2)
 
-    {:ok, %{flows: %{}, opts: opts, sender: sender}}
+    {:ok, %{flows: %{}, opts: opts, sender: sender, answer_callback: answer_callback}}
   end
 
   @impl true
@@ -97,10 +106,21 @@ defmodule Hotline.Flow.Engine do
     if Map.has_key?(state.flows, chat_id) do
       {:reply, {:error, :flow_active}, state}
     else
-      {ctx, effects} = Runner.start(flow_module, chat_id, flow_opts)
-      execute_effects(effects, state)
-      state = put_or_remove_flow(state, chat_id, ctx, effects)
-      {:reply, :ok, state}
+      # Isolate start failures the same way handle_info isolates update failures:
+      # a misconfigured flow_module must not crash the Engine and drop every other
+      # chat's flow state. Degrade to {:error, _} with the existing state intact.
+      # The rescue is scoped to Runner.start only — effect sends are isolated
+      # separately in execute_effects/2, so a send failure is no longer mislabeled
+      # as :flow_start_failed (review W1).
+      case safe_start(flow_module, chat_id, flow_opts) do
+        {:ok, ctx, effects} ->
+          execute_effects(effects, state)
+          state = put_or_remove_flow(state, chat_id, ctx, effects)
+          {:reply, :ok, state}
+
+        {:error, :flow_start_failed} ->
+          {:reply, {:error, :flow_start_failed}, state}
+      end
     end
   end
 
@@ -154,6 +174,22 @@ defmodule Hotline.Flow.Engine do
 
   def handle_info(_msg, state), do: {:noreply, state}
 
+  # Redact the bot token (carried in :opts and threaded to the sender) from SASL
+  # crash reports and :sys.get_status/1 output.
+  @impl true
+  def format_status(status) do
+    case status do
+      %{state: %{opts: opts} = state} -> %{status | state: %{state | opts: redact_token(opts)}}
+      _ -> status
+    end
+  end
+
+  defp redact_token(opts) when is_list(opts) do
+    if Keyword.has_key?(opts, :token), do: Keyword.put(opts, :token, "[REDACTED]"), else: opts
+  end
+
+  defp redact_token(opts), do: opts
+
   # Helpers
 
   defp put_or_remove_flow(state, chat_id, ctx, effects) do
@@ -180,16 +216,45 @@ defmodule Hotline.Flow.Engine do
     for effect <- effects do
       case effect do
         {:send_message, chat_id, text, nil} ->
-          state.sender.(%{chat_id: chat_id, text: text}, state.opts)
+          safe_send(state, %{chat_id: chat_id, text: text})
 
         {:send_message, chat_id, text, keyboard} ->
           reply_markup = %{inline_keyboard: keyboard}
-          state.sender.(%{chat_id: chat_id, text: text, reply_markup: reply_markup}, state.opts)
+          safe_send(state, %{chat_id: chat_id, text: text, reply_markup: reply_markup})
 
         _ ->
           :ok
       end
     end
+  end
+
+  # Isolate a single chat's send failure (mirrors safe_answer_callback): the sender
+  # is called outside any try in handle_info/start_flow, so a raising sender — a
+  # misconfig or a custom test/injected sender — would otherwise crash the Engine
+  # and drop EVERY chat's in-flight flow. Degrade to a logged warning instead.
+  defp safe_send(state, params) do
+    state.sender.(params, state.opts)
+  rescue
+    e ->
+      Logger.warning(
+        "Flow send_message failed for chat #{params[:chat_id]}: #{Exception.message(e)}"
+      )
+
+      :ok
+  end
+
+  # Guard only the flow start (e.g. a module that doesn't `use Hotline.Flow`); the
+  # effect sends it produces are isolated separately in execute_effects/2.
+  defp safe_start(flow_module, chat_id, flow_opts) do
+    {ctx, effects} = Runner.start(flow_module, chat_id, flow_opts)
+    {:ok, ctx, effects}
+  rescue
+    e ->
+      Logger.warning(
+        "Flow #{inspect(flow_module)} failed to start for chat #{chat_id}: #{Exception.message(e)}"
+      )
+
+      {:error, :flow_start_failed}
   end
 
   defp safe_callback(module, function, args) do
@@ -205,11 +270,14 @@ defmodule Hotline.Flow.Engine do
     id = if is_map(callback_query), do: Map.get(callback_query, :id)
 
     if id do
-      opts = state.opts
-      Hotline.answer_callback_query(%{callback_query_id: id}, opts)
+      # Routed through an injectable seam (defaults to Hotline.answer_callback_query/2)
+      # so tests can assert on a double instead of hitting a live Telegram boundary.
+      state.answer_callback.(%{callback_query_id: id}, state.opts)
     end
   rescue
-    _ -> :ok
+    e ->
+      Logger.warning("Failed to answer callback query: #{Exception.message(e)}")
+      :ok
   end
 
   @doc false

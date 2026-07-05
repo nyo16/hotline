@@ -126,4 +126,30 @@ defmodule Hotline.FlowTest do
       assert StringPromptFlow.on_cancel(ctx) == :ok
     end
   end
+
+  describe "step/2 compile-time validation" do
+    test "rejects a map keyboard (a common list-vs-map typo)" do
+      assert_raise ArgumentError, ~r/got a map/, fn ->
+        Code.compile_string(~s"""
+        defmodule BadKeyboardFlow#{System.unique_integer([:positive])} do
+          use Hotline.Flow
+          step :s, prompt: "hi", keyboard: %{a: 1}
+        end
+        """)
+      end
+    end
+
+    test "accepts a list-of-rows keyboard and a fn prompt" do
+      result =
+        Code.compile_string(~s"""
+        defmodule GoodKeyboardFlow#{System.unique_integer([:positive])} do
+          use Hotline.Flow
+          step :s, prompt: fn _ctx -> "hi" end, keyboard: [[%{text: "Y", callback_data: "y"}]]
+          def handle_input(_, _, _), do: :done
+        end
+        """)
+
+      assert [{_mod, _bytecode}] = result
+    end
+  end
 end

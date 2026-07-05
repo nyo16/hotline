@@ -3,6 +3,13 @@ defmodule Hotline.Client do
   HTTP client for the Telegram Bot API using Req.
 
   Handles JSON and multipart requests, retries, telemetry, and response parsing.
+
+  ## Token handling
+
+  The bot token is embedded in the request path (`/bot<TOKEN>/<method>`) as the
+  Telegram API requires. It is never logged: telemetry metadata carries only the
+  method and params, transport errors surface the reason (not the URL), and Req's
+  retry logging omits the URL. Keep custom telemetry handlers from logging the URL.
   """
 
   alias Hotline.{Config, Error}

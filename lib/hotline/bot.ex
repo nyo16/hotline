@@ -64,7 +64,25 @@ defmodule Hotline.Bot do
       allow [111, 222]                    # literal IDs
       allow {:config, :my_allowed_ids}    # resolve from Application env at init
 
-  These merge with the runtime `allowed_ids` option. Omit both to accept all users.
+  These merge with the runtime `allowed_ids` option.
+
+  **Empty vs. omitted (important):**
+
+    * Omit `allow` **and** `allowed_ids` entirely → allow-all (every user accepted).
+    * A merged allow-list that resolves to `[]` → **deny-all** (every update rejected).
+
+  These are deliberately different: an explicit empty list fails closed. The
+  common footgun is an *accidental* empty list — e.g. `allowed_ids:
+  MyApp.admin_ids()` where the query returns `[]` — which silently locks everyone
+  out. The bot logs a `Logger.warning` at init whenever the merged allow-list is
+  empty so this is visible in the logs.
+
+  > #### `channel_post` note {: .info}
+  >
+  > For `channel_post` updates there is no `from` user, so `extract_sender_id/1`
+  > falls back to the *chat* id. That chat id is then checked against the *user*
+  > allow-list. If you allow channel posts, add the relevant chat ids to the
+  > allow-list. Updates with no extractable sender fail closed (rejected).
 
   ## Manual Usage
 
@@ -83,7 +101,8 @@ defmodule Hotline.Bot do
   ## Options
 
     * `:token` — bot token (can also be set via config or env var)
-    * `:allowed_ids` — list of user IDs permitted to interact (merged with `allow`)
+    * `:allowed_ids` — list of user IDs permitted to interact (merged with `allow`).
+      An empty merged list means deny-all; omit entirely for allow-all.
     * `:chat_id` — initial chat ID (auto-detected from first message if omitted)
     * `:name` — process name (defaults to module name)
 
@@ -97,6 +116,8 @@ defmodule Hotline.Bot do
   @callback init_bot(map()) :: {:ok, map()}
 
   @optional_callbacks handle_update: 2, init_bot: 1
+
+  require Logger
 
   @valid_update_types [
     :message,
@@ -140,12 +161,19 @@ defmodule Hotline.Bot do
 
         declared = __MODULE__.__declared_allowed_ids__()
         resolved_declared = Hotline.Bot.resolve_allowed_ids(declared)
-        merged_ids = Hotline.Bot.merge_allowed_ids(resolved_declared, init_opts[:allowed_ids])
 
+        merged_ids =
+          Hotline.Bot.merge_allowed_ids(declared, resolved_declared, init_opts[:allowed_ids])
+
+        Hotline.Bot.warn_if_deny_all(merged_ids, __MODULE__)
+
+        # Store opts WITHOUT the token: the framework never reads it (bots send via
+        # Config-resolved tokens), and keeping it here would leak it into SASL crash
+        # reports and inspect/1 output.
         state = %{
           chat_id: init_opts[:chat_id],
           allowed_ids: merged_ids,
-          opts: init_opts
+          opts: Hotline.Bot.sanitize_opts(init_opts)
         }
 
         state =
@@ -177,13 +205,35 @@ defmodule Hotline.Bot do
 
           handle_update(update, state)
         else
+          # Give operators a signal for *why* a bot ignored a user, mirroring the
+          # poller's [:hotline, :update, :received] event.
+          :telemetry.execute(
+            [:hotline, :update, :rejected],
+            %{},
+            %{bot: __MODULE__, sender_id: sender_id, update_id: Map.get(update, :update_id)}
+          )
+
           {:noreply, state}
         end
       end
 
       def handle_info(_msg, state), do: {:noreply, state}
 
-      defoverridable start_link: 1, init: 1
+      # Defense-in-depth token redaction for SASL crash reports / :sys.get_status.
+      # The token is already stripped from stored opts at init; this also covers
+      # anything a custom init_bot/1 may have added back.
+      @impl GenServer
+      def format_status(status) do
+        case status do
+          %{state: %{opts: opts} = state} ->
+            %{status | state: %{state | opts: Hotline.Bot.redact_opts(opts)}}
+
+          _ ->
+            status
+        end
+      end
+
+      defoverridable start_link: 1, init: 1, format_status: 1
     end
   end
 
@@ -293,10 +343,28 @@ defmodule Hotline.Bot do
       allow {:config, :admin_ids}
   """
   defmacro allow(ids) do
+    validate_allowed_ids!(ids)
+
     quote do
       @hotline_allowed_ids unquote(ids)
     end
   end
+
+  # Compile-time guard (mirrors how on/2 validates update types): a bare
+  # `allow 123` would otherwise raise a cryptic FunctionClauseError from
+  # resolve_allowed_ids/1 at init. Non-literal expressions (vars, calls, config
+  # tuples) are resolved later, so only obviously-wrong scalar literals raise.
+  defp validate_allowed_ids!(ids) when is_list(ids), do: :ok
+  defp validate_allowed_ids!({:config, _key}), do: :ok
+
+  defp validate_allowed_ids!(scalar)
+       when is_integer(scalar) or is_float(scalar) or is_binary(scalar) or is_atom(scalar) do
+    raise ArgumentError,
+          "allow/1 expects a list of user IDs or {:config, key}, got: #{inspect(scalar)}. " <>
+            "Did you mean `allow [#{inspect(scalar)}]`?"
+  end
+
+  defp validate_allowed_ids!(_other), do: :ok
 
   defmacro __before_compile__(env) do
     commands = Module.get_attribute(env.module, :hotline_commands) |> Enum.reverse()
@@ -469,6 +537,11 @@ defmodule Hotline.Bot do
   def allowed?(nil, _allowed_ids), do: false
   def allowed?(sender_id, allowed_ids), do: sender_id in allowed_ids
 
+  # Resolve the "sender" id used for access control. `channel_post` updates have
+  # no `from` user, so we fall back to the *chat* id — meaning a channel's chat id
+  # is checked against the *user* allow-list (allow channel posts by adding the
+  # chat id to the allow-list). Anything with no extractable sender returns nil,
+  # which `allowed?/2` rejects (fail closed).
   @doc false
   def extract_sender_id(%{message: %{from: %{id: id}}}), do: id
   def extract_sender_id(%{callback_query: %{from: %{id: id}}}), do: id
@@ -513,9 +586,45 @@ defmodule Hotline.Bot do
     end)
   end
 
+  # Merge compile-time `allow` declarations with the runtime `:allowed_ids`.
+  #
+  # Allow-all (`nil`) is decided from the *presence* of a declaration or runtime
+  # opt, NOT the post-resolve list. `declared` is the raw list of `allow` args, so
+  # `allow {:config, key}` with the config unset — which *resolves* to `[]` — is
+  # still a declaration and must fail closed (deny-all), never silently reopen the
+  # bot to everyone. That distinction is impossible to make from the resolved list
+  # alone (both an unset config and a bare `allow []` resolve to `[]`).
+  #
+  # Returns `nil` (allow-all) only when nothing was declared AND no runtime opt was
+  # given. Otherwise returns the resolved ids merged with the runtime list — which
+  # may itself be `[]` (deny-all), kept distinct from `nil` on purpose.
   @doc false
-  def merge_allowed_ids([], nil), do: nil
-  def merge_allowed_ids(declared, nil) when declared != [], do: declared
-  def merge_allowed_ids([], runtime) when runtime != nil, do: runtime
-  def merge_allowed_ids(declared, runtime), do: Enum.uniq(declared ++ runtime)
+  def merge_allowed_ids([] = _declared, _resolved, nil), do: nil
+
+  def merge_allowed_ids(_declared, resolved, runtime),
+    do: Enum.uniq(resolved ++ List.wrap(runtime))
+
+  # Drop the token from opts before they are stored in GenServer state.
+  @doc false
+  def sanitize_opts(opts) when is_list(opts), do: Keyword.delete(opts, :token)
+  def sanitize_opts(opts), do: opts
+
+  # Redact the token in opts for status/inspect output (keeps the key, hides the value).
+  @doc false
+  def redact_opts(opts) when is_list(opts) do
+    if Keyword.has_key?(opts, :token), do: Keyword.put(opts, :token, "[REDACTED]"), else: opts
+  end
+
+  def redact_opts(opts), do: opts
+
+  @doc false
+  def warn_if_deny_all([], module) do
+    Logger.warning(
+      "#{inspect(module)}: allow-list resolved to [] — the bot will reject ALL updates " <>
+        "(deny-all). Omit `allow`/`:allowed_ids` entirely to accept all users, or check " <>
+        "whether a runtime source (config/DB query) returned an empty list."
+    )
+  end
+
+  def warn_if_deny_all(_merged, _module), do: :ok
 end
