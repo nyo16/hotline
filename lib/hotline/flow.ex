@@ -115,6 +115,22 @@ defmodule Hotline.Flow do
     end
   end
 
+  # A map literal (e.g. `keyboard: %{...}` instead of a list of rows) would
+  # otherwise fall through to the fn-call clause below and crash at runtime with
+  # BadFunctionError. Reject it at compile time with an actionable message.
+  defp build_step_clause(fun, name, {:%{}, _, _} = map_ast) do
+    opt = fun |> Atom.to_string() |> String.trim("_")
+
+    hint =
+      if opt == "keyboard",
+        do: " Keyboards are a list of button rows: [[%{text: ..., callback_data: ...}]].",
+        else: ""
+
+    raise ArgumentError,
+          "step #{inspect(name)}: `#{opt}:` got a map (#{Macro.to_string(map_ast)}), " <>
+            "which is not valid — expected a string, a list, or a fn/1.#{hint}"
+  end
+
   defp build_step_clause(fun, name, fn_ast) do
     quote do
       def unquote(fun)(unquote(name), flow_ctx), do: unquote(fn_ast).(flow_ctx)

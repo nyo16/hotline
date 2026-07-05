@@ -1,5 +1,5 @@
 defmodule Hotline.Flow.EngineTest do
-  use ExUnit.Case
+  use ExUnit.Case, async: true
 
   alias Hotline.Flow.Engine
 
@@ -35,6 +35,11 @@ defmodule Hotline.Flow.EngineTest do
     def handle_input(:boom, _, _ctx), do: raise("boom!")
   end
 
+  # Intentionally does NOT `use Hotline.Flow`, so it has no __steps__/0 —
+  # Runner.start/3 raises UndefinedFunctionError when asked to start it.
+  defmodule NotAFlow do
+  end
+
   # Helpers
 
   defp unique_name, do: :"engine_#{System.unique_integer([:positive])}"
@@ -47,9 +52,22 @@ defmodule Hotline.Flow.EngineTest do
       {:ok, %{}}
     end
 
+    answer_callback = fn params, _opts ->
+      send(test_pid, {:answered, params})
+      {:ok, %{}}
+    end
+
     name = opts[:name] || unique_name()
 
-    {:ok, pid} = Engine.start_link(Keyword.merge([sender: sender, name: name], opts))
+    {:ok, pid} =
+      Engine.start_link(
+        Keyword.merge([sender: sender, answer_callback: answer_callback, name: name], opts)
+      )
+
+    # Stop the engine when the test ends — it links to the test process but a
+    # normal test-process exit does not kill it, so it would otherwise leak.
+    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+
     {pid, name}
   end
 
@@ -194,7 +212,7 @@ defmodule Hotline.Flow.EngineTest do
       assert Engine.active_flow?(123, name)
     end
 
-    test "routes callback queries to active flow" do
+    test "routes callback queries to active flow and answers the callback via the injected seam" do
       {pid, name} = start_engine()
 
       Engine.start_flow(123, TestRegistration, %{test_pid: self()}, name)
@@ -202,6 +220,11 @@ defmodule Hotline.Flow.EngineTest do
 
       # Callback queries still reach the flow (though TestRegistration doesn't handle them specially)
       send_update(pid, cb_update("some_data", 123))
+
+      # The callback is acknowledged through the injected answer_callback double —
+      # asserting here (rather than relying on a rescued live call) proves the seam is wired.
+      assert_receive {:answered, %{callback_query_id: "cb_" <> _}}
+
       # Should get a retry since no callback handler matches "say yes"
       assert_receive {:sent, %{chat_id: 123}}
     end
@@ -252,6 +275,122 @@ defmodule Hotline.Flow.EngineTest do
 
       # Flow should be removed after crash
       refute Engine.active_flow?(123, name)
+    end
+
+    test "format_status/1 redacts the bot token carried in opts" do
+      status = %{
+        state: %{
+          flows: %{},
+          opts: [token: "SECRET-ENGINE-TOKEN", name: :x],
+          sender: fn _, _ -> :ok end,
+          answer_callback: fn _, _ -> :ok end
+        }
+      }
+
+      redacted = Engine.format_status(status)
+      assert redacted.state.opts[:token] == "[REDACTED]"
+      refute inspect(redacted.state.opts) =~ "SECRET-ENGINE-TOKEN"
+    end
+
+    test "hides the token from :sys.get_status/1 (exercises the real OTP callback path)" do
+      # The direct-call test above passes even if format_status/1 has the wrong
+      # callback shape (OTP would silently skip it, leaking the token). Drive the
+      # token through :sys.get_status so a broken callback fails OPEN visibly here.
+      {pid, _name} = start_engine(token: "SUPER-SECRET-ENGINE-OTP-TOKEN")
+
+      dump = inspect(:sys.get_status(pid), limit: :infinity, printable_limit: :infinity)
+
+      refute dump =~ "SUPER-SECRET-ENGINE-OTP-TOKEN"
+      assert dump =~ "[REDACTED]"
+    end
+
+    test "a broken flow_module fails to start without crashing the Engine or other chats" do
+      {pid, name} = start_engine()
+
+      # A healthy flow on another chat that must survive the broken start.
+      assert :ok = Engine.start_flow(100, TestRegistration, %{test_pid: self()}, name)
+      assert_receive {:sent, %{chat_id: 100, text: "What's your name?"}}
+
+      # NotAFlow has no __steps__/0, so Runner.start raises. The Engine degrades
+      # to an error instead of crashing and taking down every chat's flow state.
+      assert {:error, :flow_start_failed} = Engine.start_flow(200, NotAFlow, %{}, name)
+
+      # Same Engine process (never crashed); the healthy flow is untouched.
+      assert Process.alive?(pid)
+      assert Engine.active_flow?(100, name)
+      refute Engine.active_flow?(200, name)
+
+      # And the surviving flow still advances normally.
+      send_update(pid, msg_update("Alice", 100))
+      assert_receive {:sent, %{chat_id: 100, text: "Confirm?"}}
+    end
+
+    test "a raising sender during start does not crash the Engine or drop other chats' flows" do
+      test_pid = self()
+
+      # Sender raises for chat 666 (mimics a misconfig / bad custom sender), forwards
+      # everything else. Without isolation this raise crashes the Engine mid-start.
+      sender = fn
+        %{chat_id: 666}, _opts ->
+          raise "sender boom (start)"
+
+        params, _opts ->
+          send(test_pid, {:sent, params})
+          {:ok, %{}}
+      end
+
+      {pid, name} = start_engine(sender: sender)
+
+      # Healthy flow on chat 100 must survive the broken send on chat 666.
+      assert :ok = Engine.start_flow(100, TestRegistration, %{test_pid: self()}, name)
+      assert_receive {:sent, %{chat_id: 100, text: "What's your name?"}}
+
+      # The first-prompt send raises, but the failure is isolated in execute_effects,
+      # so the start still succeeds and the Engine never crashes.
+      assert :ok = Engine.start_flow(666, TestRegistration, %{test_pid: self()}, name)
+
+      assert Process.alive?(pid)
+      assert Engine.active_flow?(666, name)
+      assert Engine.active_flow?(100, name)
+
+      # The surviving flow still advances normally.
+      send_update(pid, msg_update("Alice", 100))
+      assert_receive {:sent, %{chat_id: 100, text: "Confirm?"}}
+    end
+
+    test "a raising sender during update handling does not crash the Engine or drop other chats' flows" do
+      test_pid = self()
+
+      # Sender raises only when chat 777's flow tries to send its second prompt.
+      sender = fn
+        %{chat_id: 777, text: "Confirm?"}, _opts ->
+          raise "sender boom (update)"
+
+        params, _opts ->
+          send(test_pid, {:sent, params})
+          {:ok, %{}}
+      end
+
+      {pid, name} = start_engine(sender: sender)
+
+      assert :ok = Engine.start_flow(100, TestRegistration, %{test_pid: self()}, name)
+      assert_receive {:sent, %{chat_id: 100, text: "What's your name?"}}
+
+      assert :ok = Engine.start_flow(777, TestRegistration, %{test_pid: self()}, name)
+      # 777's first prompt sends fine ("What's your name?" != "Confirm?").
+      assert_receive {:sent, %{chat_id: 777, text: "What's your name?"}}
+
+      # Advancing 777 emits "Confirm?", whose send raises inside handle_info —
+      # must be isolated so the Engine survives and other chats are unaffected.
+      send_update(pid, msg_update("Alice", 777))
+
+      assert Process.alive?(pid)
+      assert Engine.active_flow?(100, name)
+      assert Engine.active_flow?(777, name)
+
+      # The healthy chat is completely unaffected and still advances.
+      send_update(pid, msg_update("Bob", 100))
+      assert_receive {:sent, %{chat_id: 100, text: "Confirm?"}}
     end
   end
 end
