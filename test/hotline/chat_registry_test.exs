@@ -38,7 +38,7 @@ defmodule Hotline.ChatRegistryTest do
   end
 
   @tag :tmp_dir
-  test "tracks chats from updates and persists via DETS", %{tmp_dir: tmp_dir} do
+  test "tracks chats from updates and persists via the store", %{tmp_dir: tmp_dir} do
     dets_path = Path.join(tmp_dir, "test_chats.dets")
     name = :"TestRegistry#{System.unique_integer([:positive])}"
 
@@ -56,7 +56,7 @@ defmodule Hotline.ChatRegistryTest do
   end
 
   @tag :tmp_dir
-  test "restores chats from DETS on restart", %{tmp_dir: tmp_dir} do
+  test "restores chats from the store on restart", %{tmp_dir: tmp_dir} do
     dets_path = Path.join(tmp_dir, "persist_chats.dets")
     name = :"PersistRegistry#{System.unique_integer([:positive])}"
 
@@ -67,9 +67,10 @@ defmodule Hotline.ChatRegistryTest do
     :sys.get_state(pid)
 
     assert ChatRegistry.count(name) == 1
+    # Clean stop flushes the store (Store.close/1) before releasing the file.
     GenServer.stop(pid)
 
-    # Restart with same DETS path, new ETS
+    # Restart with same DETS path, new registry (fresh cache warmed from the store).
     name2 = :"PersistRegistry2#{System.unique_integer([:positive])}"
     start_registry(name: name2, dets_path: dets_path)
 
@@ -78,7 +79,7 @@ defmodule Hotline.ChatRegistryTest do
   end
 
   @tag :tmp_dir
-  test "synced writes survive a brutal kill (no clean terminate)", %{tmp_dir: tmp_dir} do
+  test "a flushed write survives a brutal kill (no clean terminate)", %{tmp_dir: tmp_dir} do
     dets_path = Path.join(tmp_dir, "crash_chats.dets")
     name = :"CrashRegistry#{System.unique_integer([:positive])}"
 
@@ -86,11 +87,16 @@ defmodule Hotline.ChatRegistryTest do
 
     chat = %Hotline.Types.Chat{id: 999, type: "private", first_name: "Crash"}
     ChatRegistry.track(chat, name)
-    # Ensure the cast (and its :dets.sync) completed before we kill.
-    :sys.get_state(pid)
 
-    # Brutal kill: terminate/2 never runs, so only writes already flushed by
-    # :dets.sync/1 can survive. Trap the linked exit so the test itself lives.
+    # Writes are no longer fsynced per-track — durability comes from a flush
+    # (periodic auto_save, an explicit sync, or a clean close). Force a flush
+    # through the store handle, using :sys.get_state as a FIFO barrier so the
+    # :track cast has definitely been applied first.
+    %{store: store_handle} = :sys.get_state(pid)
+    Hotline.Store.DETS.sync(store_handle)
+
+    # Brutal kill: terminate/2 never runs, so only data already flushed to disk can
+    # survive. Trap the linked exit so the test itself lives.
     Process.flag(:trap_exit, true)
     ref = Process.monitor(pid)
     Process.exit(pid, :kill)
@@ -153,5 +159,24 @@ defmodule Hotline.ChatRegistryTest do
     :sys.get_state(pid)
 
     assert %{id: 789, first_name: "Bob"} = ChatRegistry.get(789, name)
+  end
+
+  test "supports an explicit :store backend (in-memory ETS, no files)" do
+    name = :"EtsStoreRegistry#{System.unique_integer([:positive])}"
+
+    {:ok, pid} =
+      ChatRegistry.start_link(name: name, store: {Hotline.Store.ETS, name: :"#{name}.EtsStore"})
+
+    stop_on_exit(pid)
+
+    ChatRegistry.track(
+      %Hotline.Types.Chat{id: 42, type: "private", first_name: "Ephemeral"},
+      name
+    )
+
+    :sys.get_state(pid)
+
+    assert %{id: 42, first_name: "Ephemeral"} = ChatRegistry.get(42, name)
+    assert ChatRegistry.count(name) == 1
   end
 end
