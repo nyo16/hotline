@@ -35,7 +35,6 @@ defmodule Hotline.MixProject do
       {:phoenix_pubsub, "~> 2.1"},
       {:mime, "~> 2.0", optional: true},
       {:broadway, "~> 1.0", optional: true},
-      {:rocksdb, "~> 3.1", optional: true},
       {:ex_doc, "~> 0.35", only: :dev, runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}

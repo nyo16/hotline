@@ -2,6 +2,8 @@ defmodule Hotline.ChatRegistryTest do
   use ExUnit.Case, async: true
 
   alias Hotline.ChatRegistry
+  alias Hotline.Store.DETS
+  alias Hotline.Store.ETS
 
   # Start a registry and guarantee teardown even if an assertion fails. Named
   # GenServers and their named ETS/DETS tables would otherwise leak for the VM
@@ -93,7 +95,7 @@ defmodule Hotline.ChatRegistryTest do
     # through the store handle, using :sys.get_state as a FIFO barrier so the
     # :track cast has definitely been applied first.
     %{store: store_handle} = :sys.get_state(pid)
-    Hotline.Store.DETS.sync(store_handle)
+    DETS.sync(store_handle)
 
     # Brutal kill: terminate/2 never runs, so only data already flushed to disk can
     # survive. Trap the linked exit so the test itself lives.
@@ -165,7 +167,7 @@ defmodule Hotline.ChatRegistryTest do
     name = :"EtsStoreRegistry#{System.unique_integer([:positive])}"
 
     {:ok, pid} =
-      ChatRegistry.start_link(name: name, store: {Hotline.Store.ETS, name: :"#{name}.EtsStore"})
+      ChatRegistry.start_link(name: name, store: {ETS, name: :"#{name}.EtsStore"})
 
     stop_on_exit(pid)
 
@@ -178,5 +180,41 @@ defmodule Hotline.ChatRegistryTest do
 
     assert %{id: 42, first_name: "Ephemeral"} = ChatRegistry.get(42, name)
     assert ChatRegistry.count(name) == 1
+  end
+
+  @tag :tmp_dir
+  test "with cache: false, reads go through to the store (no in-RAM cache)", %{tmp_dir: tmp_dir} do
+    dets_path = Path.join(tmp_dir, "nocache_chats.dets")
+    name = :"NoCacheRegistry#{System.unique_integer([:positive])}"
+
+    pid = start_registry(name: name, dets_path: dets_path, cache: false)
+
+    # No front cache table is created when caching is disabled.
+    assert :ets.whereis(:"#{name}.Cache") == :undefined
+
+    ChatRegistry.track(
+      %Hotline.Types.Chat{id: 5, type: "private", first_name: "ReadThrough"},
+      name
+    )
+
+    :sys.get_state(pid)
+
+    # Reads are served straight from the durable store (no GenServer round-trip).
+    assert %{id: 5, first_name: "ReadThrough"} = ChatRegistry.get(5, name)
+    assert ChatRegistry.count(name) == 1
+    assert [%{id: 5}] = ChatRegistry.list(name)
+    assert ChatRegistry.get(404, name) == nil
+  end
+
+  test "publishes and cleans up its persistent_term read descriptor" do
+    name = :"PtermRegistry#{System.unique_integer([:positive])}"
+
+    {:ok, pid} =
+      ChatRegistry.start_link(name: name, store: {ETS, name: :"#{name}.EtsStore"})
+
+    assert %{store_mod: ETS} = :persistent_term.get({ChatRegistry, name})
+
+    GenServer.stop(pid)
+    assert :persistent_term.get({ChatRegistry, name}, :absent) == :absent
   end
 end

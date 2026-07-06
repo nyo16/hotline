@@ -10,9 +10,10 @@ if Code.ensure_loaded?(:rocksdb) do
 
     ## Enabling
 
-    Add the dependency to your app (it is not pulled in by default):
+    Add the dependency to your app (Hotline does not pull it in, so its native
+    build never burdens Hotline's own compile):
 
-        {:rocksdb, "~> 1.8"}
+        {:rocksdb, "~> 3.1"}
 
     The `:rocksdb` package builds RocksDB's C++ from source, so a C++ toolchain and
     CMake are required. With CMake ≥ 4 the vendored build may fail on RocksDB's old

@@ -1,20 +1,29 @@
 defmodule Hotline.ChatRegistry do
   @moduledoc """
-  Tracks known chats using an in-memory ETS read cache backed by a pluggable
-  durable `Hotline.Store`.
+  Tracks known chats behind a pluggable durable `Hotline.Store`, with an optional
+  in-memory ETS read cache in front.
 
   Automatically subscribes to PubSub and records chats from incoming updates.
   Survives restarts via the configured store.
 
   ## Architecture
 
-  Reads (`list/1`, `get/2`, `count/1`) are served from a per-registry **ETS cache**
-  with no GenServer round-trip, so read latency never depends on the backend. The
-  GenServer owns the write path: every tracked chat is written through to the ETS
-  cache **and** the durable `Store`. At boot the cache is warmed from the store.
+  Reads (`list/1`, `get/2`, `count/1`) are served **without a GenServer round-trip**.
+  By default a per-registry **ETS cache** holds every chat in memory and answers
+  reads directly; the GenServer owns the write path, writing each tracked chat
+  through to the cache **and** the durable `Store`. At boot the cache is warmed from
+  the store.
 
-      updates ─► ChatRegistry ─┬─► ETS cache   (hot reads)
+      updates ─► ChatRegistry ─┬─► ETS cache   (hot reads; optional)
                                └─► Store        (durable: DETS | RocksDB | …)
+
+  Set `cache: false` to drop the in-memory cache. Reads then go straight to the
+  store — still lock-free (the store handle is published in `:persistent_term`, so
+  there is no GenServer round-trip), just backend-dependent. Use this with large
+  datasets (e.g. RocksDB) where keeping every chat in RAM would defeat the point of
+  an on-disk store; the trade-off is that `get/2` becomes a store read and
+  `list/1`/`count/1` become full store scans. With `cache: false` the boot-time
+  warm-up (a full `Store.list`) is also skipped.
 
   ## Persistence & durability
 
@@ -29,11 +38,13 @@ defmodule Hotline.ChatRegistry do
 
   Add to your supervision tree (after PubSub):
 
-      # Default: DETS
+      # Default: DETS + in-memory cache
       {Hotline.ChatRegistry, dets_path: "priv/hotline/chats.dets"}
 
-      # Or choose a backend explicitly:
-      {Hotline.ChatRegistry, store: {Hotline.Store.RocksDB, path: "priv/hotline/chats.db"}}
+      # RocksDB, reading through to the store (no full in-RAM copy):
+      {Hotline.ChatRegistry,
+        store: {Hotline.Store.RocksDB, path: "priv/hotline/chats.db"},
+        cache: false}
 
   Then query:
 
@@ -45,6 +56,9 @@ defmodule Hotline.ChatRegistry do
 
     * `:store` — `{module, opts}` selecting the durable backend (default:
       `{Hotline.Store.DETS, ...}` built from the legacy options below).
+    * `:cache` — keep an in-memory ETS read cache in front of the store
+      (default `true`). Set to `false` to read through to the store and avoid a
+      full in-RAM copy (recommended for large datasets / RocksDB).
     * `:dets_path` — path for the default DETS store (also `:chat_registry_path`
       app env). Ignored if `:store` is given.
     * `:sync_interval` — flush interval for the default DETS store (also
@@ -58,26 +72,56 @@ defmodule Hotline.ChatRegistry do
   @default_sync_interval 5_000
   @collection :chats
 
-  # --- Public API (read from the ETS cache, no GenServer bottleneck) ---
+  # --- Public API (no GenServer bottleneck) ---
+  #
+  # Reads resolve a small descriptor published in :persistent_term at init. With a
+  # cache they hit ETS; without one they read straight from the store handle. Either
+  # way there is no round-trip through the GenServer.
 
   @doc "List all known chats."
   def list(name \\ __MODULE__) do
-    cache_table(name)
-    |> :ets.tab2list()
-    |> Enum.map(fn {_id, chat} -> chat end)
+    case descriptor(name) do
+      %{cache: nil, store_mod: store_mod, store: handle} ->
+        store_mod.list(handle, @collection)
+
+      %{cache: cache} ->
+        cache
+        |> :ets.tab2list()
+        |> Enum.map(fn {_id, chat} -> chat end)
+    end
   end
 
   @doc "Get a chat by ID."
   def get(chat_id, name \\ __MODULE__) do
-    case :ets.lookup(cache_table(name), chat_id) do
-      [{_id, chat}] -> chat
-      [] -> nil
+    case descriptor(name) do
+      %{cache: nil, store_mod: store_mod, store: handle} ->
+        case store_mod.get(handle, @collection, chat_id) do
+          {:ok, chat} -> chat
+          :error -> nil
+        end
+
+      %{cache: cache} ->
+        case :ets.lookup(cache, chat_id) do
+          [{_id, chat}] -> chat
+          [] -> nil
+        end
     end
   end
 
-  @doc "Count known chats."
+  @doc """
+  Count known chats.
+
+  With `cache: false` this scans the store's keys, which for some backends
+  (e.g. RocksDB) is O(n) — avoid calling it on a hot path.
+  """
   def count(name \\ __MODULE__) do
-    :ets.info(cache_table(name), :size)
+    case descriptor(name) do
+      %{cache: nil, store_mod: store_mod, store: handle} ->
+        length(store_mod.keys(handle, @collection))
+
+      %{cache: cache} ->
+        :ets.info(cache, :size)
+    end
   end
 
   @doc "Manually track a chat."
@@ -86,6 +130,8 @@ defmodule Hotline.ChatRegistry do
   end
 
   defp cache_table(name), do: :"#{name}.Cache"
+
+  defp descriptor(name), do: :persistent_term.get({__MODULE__, name})
 
   # --- GenServer ---
 
@@ -98,15 +144,21 @@ defmodule Hotline.ChatRegistry do
   def init(opts) do
     name = opts[:name] || __MODULE__
     {store_mod, store_opts} = resolve_store(opts, name)
-
-    cache = cache_table(name)
-    :ets.new(cache, [:named_table, :set, :public, read_concurrency: true])
+    cache? = Keyword.get(opts, :cache, true)
 
     case store_mod.init(store_opts) do
       {:ok, handle} ->
-        warm_cache(cache, store_mod, handle)
+        cache = if cache?, do: build_cache(name, store_mod, handle), else: nil
+
+        # Publish the read descriptor so the public read API can serve requests
+        # without a GenServer round-trip (with or without a cache).
+        :persistent_term.put(
+          {__MODULE__, name},
+          %{cache: cache, store_mod: store_mod, store: handle}
+        )
+
         Phoenix.PubSub.subscribe(Hotline.PubSub, "hotline:updates")
-        {:ok, %{cache: cache, store_mod: store_mod, store: handle}}
+        {:ok, %{name: name, cache: cache, store_mod: store_mod, store: handle}}
 
       {:error, reason} ->
         {:stop, {:store_init_failed, reason}}
@@ -128,8 +180,10 @@ defmodule Hotline.ChatRegistry do
   def handle_info(_msg, state), do: {:noreply, state}
 
   @impl true
-  def terminate(_reason, %{store_mod: store_mod, store: handle}) do
+  def terminate(_reason, %{name: name, store_mod: store_mod, store: handle}) do
     store_mod.close(handle)
+    :persistent_term.erase({__MODULE__, name})
+    :ok
   end
 
   def terminate(_reason, _state), do: :ok
@@ -159,19 +213,22 @@ defmodule Hotline.ChatRegistry do
     end
   end
 
-  # Warm the read cache from durable storage on boot. Entries are keyed in the cache
-  # by their chat id (do_track/2 guarantees an `:id` field on every stored value).
-  defp warm_cache(cache, store_mod, handle) do
+  # Create the ETS read cache and warm it from durable storage. Entries are keyed by
+  # chat id (do_track/2 guarantees an `:id` field on every stored value).
+  defp build_cache(name, store_mod, handle) do
+    cache = cache_table(name)
+    :ets.new(cache, [:named_table, :set, :public, read_concurrency: true])
+
     for entry <- store_mod.list(handle, @collection) do
       :ets.insert(cache, {entry.id, entry})
     end
 
-    :ok
+    cache
   end
 
   # Handles both %Hotline.Types.Chat{} structs (atom keys) and raw maps (atom- or
   # string-keyed) via get_field/2, so there is a single entry shape and one write
-  # path: through the ETS cache (hot reads) and the durable store.
+  # path: through the ETS cache (when present) and always the durable store.
   defp do_track(chat, %{cache: cache, store_mod: store_mod, store: handle} = state)
        when is_map(chat) do
     id = get_field(chat, :id)
@@ -187,7 +244,7 @@ defmodule Hotline.ChatRegistry do
         last_seen: System.system_time(:second)
       }
 
-      :ets.insert(cache, {id, entry})
+      if cache, do: :ets.insert(cache, {id, entry})
       store_mod.put(handle, @collection, id, entry)
     end
 
